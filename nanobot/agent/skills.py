@@ -16,12 +16,22 @@ class SkillsLoader:
 
     Skills are markdown files (SKILL.md) that teach the agent how to use
     specific tools or perform certain tasks.
+
+    When *channel* is set, skills whose frontmatter declares a ``channel``
+    field are included **only** if the value matches.  Skills without a
+    ``channel`` field are always included regardless of the active channel.
     """
 
-    def __init__(self, workspace: Path, builtin_skills_dir: Path | None = None):
+    def __init__(
+        self,
+        workspace: Path,
+        builtin_skills_dir: Path | None = None,
+        channel: str | None = None,
+    ):
         self.workspace = workspace
         self.workspace_skills = workspace / "skills"
         self.builtin_skills = builtin_skills_dir or BUILTIN_SKILLS_DIR
+        self.channel = channel
 
     def list_skills(self, filter_unavailable: bool = True) -> list[dict[str, str]]:
         """
@@ -50,6 +60,14 @@ class SkillsLoader:
                     skill_file = skill_dir / "SKILL.md"
                     if skill_file.exists() and not any(s["name"] == skill_dir.name for s in skills):
                         skills.append({"name": skill_dir.name, "path": str(skill_file), "source": "builtin"})
+
+        # Filter by channel — if a skill declares a ``channel`` in its
+        # frontmatter, it is only visible when the loader's channel matches.
+        if self.channel:
+            skills = [s for s in skills if self._channel_match(s["name"])]
+        else:
+            # No channel set (standard AgentLoop) — exclude channel-restricted skills.
+            skills = [s for s in skills if not self._is_channel_restricted(s["name"])]
 
         # Filter by requirements
         if filter_unavailable:
@@ -173,6 +191,28 @@ class SkillsLoader:
             return data.get("nanobot", data.get("openclaw", {})) if isinstance(data, dict) else {}
         except (json.JSONDecodeError, TypeError):
             return {}
+
+    def _get_skill_channel(self, name: str) -> str | None:
+        """Return the ``channel`` declared in a skill's frontmatter, or *None*."""
+        meta = self.get_skill_metadata(name)
+        if meta:
+            return meta.get("channel") or None
+        return None
+
+    def _is_channel_restricted(self, name: str) -> bool:
+        """Return *True* if the skill declares a ``channel`` (i.e. it is restricted)."""
+        return self._get_skill_channel(name) is not None
+
+    def _channel_match(self, name: str) -> bool:
+        """Return *True* if the skill is usable under the current channel.
+
+        A skill without a ``channel`` field is always usable.
+        A skill with ``channel: X`` is usable only when ``self.channel == X``.
+        """
+        skill_channel = self._get_skill_channel(name)
+        if skill_channel is None:
+            return True
+        return skill_channel == self.channel
 
     def _check_requirements(self, skill_meta: dict) -> bool:
         """Check if skill requirements are met (bins, env vars)."""

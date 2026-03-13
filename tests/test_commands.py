@@ -498,3 +498,30 @@ def test_gateway_cli_port_overrides_configured_port(monkeypatch, tmp_path: Path)
 
     assert isinstance(result.exception, _StopGateway)
     assert "port 18792" in result.stdout
+
+
+def test_qqchat_api_uses_config_port(monkeypatch) -> None:
+    config = Config()
+    config.qqchat_compat.host = "127.0.0.1"
+    config.qqchat_compat.port = 19001
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("nanobot.config.loader.load_config", lambda _path=None: config)
+    monkeypatch.setattr("nanobot.config.loader.set_config_path", lambda _path: None)
+    monkeypatch.setattr(
+        "nanobot.qqchat_compat.server.create_app",
+        lambda compat_cfg, workspace: object(),
+    )
+
+    def _fake_run(app_instance, host: str, port: int):
+        captured["host"] = host
+        captured["port"] = port
+
+    monkeypatch.setattr("uvicorn.run", _fake_run)
+
+    result = runner.invoke(app, ["qqchat-api"])
+
+    assert result.exit_code == 0
+    assert captured["host"] == "127.0.0.1"
+    assert captured["port"] == 19001

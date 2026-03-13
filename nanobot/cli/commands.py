@@ -531,6 +531,32 @@ def gateway(
     asyncio.run(run())
 
 
+@app.command("qqchat-api")
+def qqchat_api(
+    port: int | None = typer.Option(None, "--port", "-p", help="QQChat compat API port"),
+    host: str | None = typer.Option(None, "--host", help="QQChat compat API host"),
+    workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
+):
+    """Start QQChatAgentServer protocol compatibility API."""
+    try:
+        import uvicorn
+    except ImportError as exc:
+        console.print("[red]Missing dependency: uvicorn[/red]")
+        console.print("Install with: [cyan]pip install uvicorn fastapi[/cyan]")
+        raise typer.Exit(1) from exc
+
+    from nanobot.qqchat_compat.server import create_app
+
+    runtime_config = _load_runtime_config(config, workspace)
+    qq_cfg = runtime_config.qqchat_compat
+
+    resolved_host = host or qq_cfg.host
+    resolved_port = port if port is not None else qq_cfg.port
+
+    console.print(f"{__logo__} Starting QQChat compat API on {resolved_host}:{resolved_port}...")
+    app_instance = create_app(qq_cfg, runtime_config.workspace_path)
+    uvicorn.run(app_instance, host=resolved_host, port=resolved_port)
 
 
 # ============================================================================

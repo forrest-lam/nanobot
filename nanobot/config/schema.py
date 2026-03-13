@@ -307,6 +307,17 @@ class GatewayConfig(Base):
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
 
 
+class QQChatCompatConfig(Base):
+    """QQChatAgentServer 协议兼容服务配置。"""
+
+    enabled: bool = False
+    host: str = "127.0.0.1"
+    port: int = 18990
+    session_ttl_seconds: int = 1800
+    max_sessions: int = 500
+    allowed_tools: list[str] = Field(default_factory=list)
+
+
 class WebSearchConfig(Base):
     """Web search tool configuration."""
 
@@ -360,6 +371,7 @@ class Config(BaseSettings):
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
+    qqchat_compat: QQChatCompatConfig = Field(default_factory=QQChatCompatConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
 
     @property
