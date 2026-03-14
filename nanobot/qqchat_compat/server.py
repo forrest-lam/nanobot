@@ -26,6 +26,7 @@ from nanobot.qqchat_compat.prompt_store import UserPromptStore
 from nanobot.qqchat_compat.routes import create_router
 from nanobot.qqchat_compat.session_store import SessionStore
 from nanobot.qqchat_compat.tool_policy import ToolPolicy
+from nanobot.qqchat_compat.user_config_store import UserConfigStore
 
 if TYPE_CHECKING:
     from nanobot.config.schema import ToolsConfig
@@ -94,7 +95,7 @@ def create_app(
                 logger.warning("QQChat compat: Error closing MCP connections: {}", e)
 
     allowed_tools = set(config.allowed_tools) if config.allowed_tools else DEFAULT_ALLOWED_TOOLS
-    policy = ToolPolicy(allowed_tools)
+    policy = ToolPolicy(allowed_tools=allowed_tools)
     session_store = SessionStore(
         ttl_seconds=config.session_ttl_seconds,
         max_sessions=config.max_sessions,
@@ -104,6 +105,9 @@ def create_app(
     # Setup user prompt store with templates
     package_templates = Path(__file__).resolve().parent.parent / "templates"
     prompt_store = UserPromptStore(workspace, package_templates)
+    
+    # Setup user config store
+    user_config_store = UserConfigStore(workspace / "users")
     
     package_skills_root = Path(__file__).resolve().parent.parent / "skills"
     workspace_skills_root = workspace / "skills"
@@ -118,6 +122,7 @@ def create_app(
             session_store=session_store,
             memory_store=memory_store,
             prompt_store=prompt_store,
+            user_config_store=user_config_store,
             planner=planner,
             policy=policy,
         )

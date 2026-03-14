@@ -2,6 +2,16 @@
 
 Information about the user to help personalize interactions.
 
+## QQ Identity (Auto-filled)
+
+**CRITICAL**: These fields uniquely identify YOU (the user). When analyzing chat records, messages, or tasks:
+- Messages from these identifiers = YOUR OWN messages
+- Messages from other identifiers = OTHER PEOPLE's messages
+
+- **UIN**: {user_uin}
+- **UID**: {user_uid}
+- **Nickname**: {user_nick}
+
 ## Basic Information
 
 - **Name**: (your name)

@@ -63,9 +63,9 @@ class SkillDrivenPlanner:
             mapping[skill] = tools
         return mapping
 
-    def _load_skill_metadata(self) -> dict[str, dict]:
+    def _load_skill_metadata(self) -> dict[str, dict[str, Any]]:
         """Load skill metadata (compatTools) from SKILL.md files."""
-        mapping: dict[str, dict] = {}
+        mapping: dict[str, dict[str, Any]] = {}
         for skill in self._SKILL_NAMES:
             path = self._resolve_skill_path(skill)
             if not path:
@@ -320,14 +320,72 @@ class SkillDrivenPlanner:
         joined = "\n".join(f"- {s}" for s in snippets)
         base_summary = f'围绕"{query}"已检索到以下关键信息：\n{joined}'
         
-        # Append user personality hint if available
+        # Append user identity and personality hints if available
         if user_uin and self.prompt_store:
-            soul = self.prompt_store.get_prompt(user_uin, "SOUL.md")
-            if "用户自定义偏好" in soul:
-                # Extract custom section for hint
-                lines = soul.split("## 用户自定义偏好")
+            user_prompt = self.prompt_store.get_prompt(user_uin, "USER.md")
+            soul_prompt = self.prompt_store.get_prompt(user_uin, "SOUL.md")
+            
+            # Extract user identity for context
+            identity_hint = ""
+            if "UIN:" in user_prompt:
+                identity_hint = "\n\n🔍 身份上下文："
+                # Extract UIN, UID, Nickname from USER.md
+                for line in user_prompt.split("\n"):
+                    if line.startswith("- **UIN**:"):
+                        uin = line.split(":", 1)[1].strip()
+                        identity_hint += f"\n- 你的QQ号: {uin}"
+                    elif line.startswith("- **UID**:"):
+                        uid = line.split(":", 1)[1].strip()
+                        identity_hint += f"\n- 你的UID: {uid}"
+                    elif line.startswith("- **Nickname**:"):
+                        nick = line.split(":", 1)[1].strip()
+                        identity_hint += f"\n- 你的昵称: {nick}"
+                
+                identity_hint += "\n- 💡 在分析聊天记录、待办事项时，会自动识别哪些是你说的，哪些是别人对你说的"
+            
+            # Add personality customization if exists
+            if "用户自定义偏好" in soul_prompt:
+                lines = soul_prompt.split("## 用户自定义偏好")
                 if len(lines) > 1:
                     custom_section = lines[1].strip()[:200]
-                    base_summary += f"\n\n💡 提示：根据你的偏好（{custom_section[:50]}...），以上信息已按你的习惯整理。"
+                    identity_hint += f"\n- 根据你的偏好（{custom_section[:50]}...），信息已按你的习惯整理"
+            
+            base_summary += identity_hint
         
         return base_summary
+
+    def list_available_skills(self) -> list[str]:
+        """List all available skills.
+        
+        Returns:
+            List of skill names
+        """
+        return list(self._SKILL_NAMES)
+
+    def list_enabled_skills(self, available_mcp_tools: list[str]) -> list[str]:
+        """Check which skills can be enabled based on available MCP tools.
+        
+        Args:
+            available_mcp_tools: List of MCP tools available from client
+            
+        Returns:
+            List of skill names that can be enabled
+        """
+        enabled: list[str] = []
+        
+        for skill in self._SKILL_NAMES:
+            # Get required tools from skill metadata
+            metadata = self.skill_metadata_map.get(skill, {})
+            required_tools = metadata.get("compatTools", [])
+            
+            # If no specific tools required, skill is always enabled
+            if not required_tools:
+                enabled.append(skill)
+                continue
+            
+            # Check if all required tools are available
+            if all(tool in available_mcp_tools for tool in required_tools):
+                enabled.append(skill)
+        
+        return enabled
+

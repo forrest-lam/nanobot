@@ -31,8 +31,19 @@ class UserPromptStore:
         """Get the prompt directory for a specific user."""
         return ensure_dir(self.base_dir / safe_filename(user_uin))
 
-    def _ensure_user_prompts(self, user_uin: str) -> None:
-        """Ensure user has prompt files, creating from templates if needed."""
+    def _ensure_user_prompts(
+        self,
+        user_uin: str,
+        user_uid: str = "",
+        user_nick: str = "",
+    ) -> None:
+        """Ensure user has prompt files, creating from templates if needed.
+        
+        Args:
+            user_uin: User's QQ number
+            user_uid: User's QQ UID (optional, for first-time initialization)
+            user_nick: User's nickname (optional, for first-time initialization)
+        """
         user_dir = self._user_dir(user_uin)
         
         for filename in self.TEMPLATE_FILES:
@@ -40,36 +51,59 @@ class UserPromptStore:
             if not user_file.exists():
                 template_file = self.templates_dir / filename
                 if template_file.exists():
-                    # Copy template as starting point
-                    user_file.write_text(
-                        template_file.read_text(encoding="utf-8"),
-                        encoding="utf-8",
-                    )
+                    # Copy template and fill in QQ identity fields
+                    content = template_file.read_text(encoding="utf-8")
+                    
+                    # Replace placeholders with actual values
+                    if filename == "USER.md":
+                        content = content.replace("{user_uin}", user_uin)
+                        content = content.replace("{user_uid}", user_uid or "(not provided)")
+                        content = content.replace("{user_nick}", user_nick or "(not provided)")
+                    
+                    user_file.write_text(content, encoding="utf-8")
 
-    def get_prompt(self, user_uin: str, prompt_name: str) -> str:
+    def get_prompt(
+        self,
+        user_uin: str,
+        prompt_name: str,
+        user_uid: str = "",
+        user_nick: str = "",
+    ) -> str:
         """Get a specific prompt file content for a user.
         
         Args:
             user_uin: User's QQ number
             prompt_name: Prompt filename (SOUL.md, TOOLS.md, USER.md)
+            user_uid: User's QQ UID (optional, for first-time initialization)
+            user_nick: User's nickname (optional, for first-time initialization)
             
         Returns:
             Prompt content, or empty string if file doesn't exist
         """
-        self._ensure_user_prompts(user_uin)
+        self._ensure_user_prompts(user_uin, user_uid, user_nick)
         
         user_file = self._user_dir(user_uin) / prompt_name
         if user_file.exists():
             return user_file.read_text(encoding="utf-8")
         return ""
 
-    def get_all_prompts(self, user_uin: str) -> dict[str, str]:
+    def get_all_prompts(
+        self,
+        user_uin: str,
+        user_uid: str = "",
+        user_nick: str = "",
+    ) -> dict[str, str]:
         """Get all prompt files for a user.
+        
+        Args:
+            user_uin: User's QQ number
+            user_uid: User's QQ UID (optional, for first-time initialization)
+            user_nick: User's nickname (optional, for first-time initialization)
         
         Returns:
             Dictionary mapping filename to content
         """
-        self._ensure_user_prompts(user_uin)
+        self._ensure_user_prompts(user_uin, user_uid, user_nick)
         
         result = {}
         for filename in self.TEMPLATE_FILES:
@@ -105,7 +139,13 @@ class UserPromptStore:
         
         user_file.write_text(content, encoding="utf-8")
 
-    def append_personality(self, user_uin: str, trait: str) -> None:
+    def append_personality(
+        self,
+        user_uin: str,
+        trait: str,
+        user_uid: str = "",
+        user_nick: str = "",
+    ) -> None:
         """Append a personality trait or instruction to user's SOUL.md.
         
         This is a convenience method for gradually building user personality.
@@ -113,8 +153,10 @@ class UserPromptStore:
         Args:
             user_uin: User's QQ number
             trait: Personality trait or instruction to add
+            user_uid: User's QQ UID (optional, for first-time initialization)
+            user_nick: User's nickname (optional, for first-time initialization)
         """
-        self._ensure_user_prompts(user_uin)
+        self._ensure_user_prompts(user_uin, user_uid, user_nick)
         
         # Append to SOUL.md under a custom section
         user_file = self._user_dir(user_uin) / "SOUL.md"

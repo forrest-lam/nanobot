@@ -19,12 +19,26 @@ class ToolCall(BaseModel):
     priority: int = 1
 
 
+class InitRequest(BaseModel):
+    """Incoming /init request payload for client initialization."""
+
+    user_uin: str
+    session_id: str = "default"
+    user_uid: str = ""
+    user_nick: str = ""
+    available_mcp_tools: list[str] = Field(default_factory=list)
+    client_version: str = ""
+    client_metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class QueryRequest(BaseModel):
     """Incoming /query request payload."""
 
     query: str
     session_id: str = "default"
     user_uin: str
+    user_uid: str = ""
+    user_nick: str = ""
     user_recent_chats: list[dict[str, Any]] = Field(default_factory=list)
     current_time: str = ""
     stream: bool = False
@@ -50,6 +64,18 @@ class CompatResponse(BaseModel):
     mcp_calls: list[ToolCall] = Field(default_factory=list)
     progress_hint: str = ""
     final_answer: str = ""
+    error: str = ""
+
+
+class InitResponse(BaseModel):
+    """Response for /init endpoint."""
+
+    status: Literal["success", "error"]
+    message: str
+    user_uin: str
+    user_identity_initialized: bool = False
+    available_skills: list[str] = Field(default_factory=list)
+    enabled_skills: list[str] = Field(default_factory=list)
     error: str = ""
 
 

@@ -16,9 +16,17 @@ from nanobot.qqchat_compat._channel import CHANNEL
 from nanobot.qqchat_compat.memory_store import AccountMemoryStore
 from nanobot.qqchat_compat.planner import SkillDrivenPlanner
 from nanobot.qqchat_compat.prompt_store import UserPromptStore
-from nanobot.qqchat_compat.schemas import CompatResponse, QueryRequest, SearchResultRequest, SessionSnapshot
+from nanobot.qqchat_compat.schemas import (
+    CompatResponse,
+    InitRequest,
+    InitResponse,
+    QueryRequest,
+    SearchResultRequest,
+    SessionSnapshot,
+)
 from nanobot.qqchat_compat.session_store import SessionStore
 from nanobot.qqchat_compat.tool_policy import ToolPolicy
+from nanobot.qqchat_compat.user_config_store import UserConfigStore
 
 
 def _sse_event(payload: dict) -> str:
@@ -30,16 +38,85 @@ def create_router(
     session_store: SessionStore,
     memory_store: AccountMemoryStore,
     prompt_store: UserPromptStore,
+    user_config_store: UserConfigStore,
     planner: SkillDrivenPlanner,
     policy: ToolPolicy,
 ) -> APIRouter:
     router = APIRouter(tags=["qqchat-compat"])
+
+    @router.post("/init", response_model=InitResponse)
+    async def init(request: InitRequest) -> InitResponse:
+        """Initialize client connection and save user configuration.
+        
+        This endpoint should be called when the client first connects or session starts.
+        It saves:
+        1. User's QQ identity (UIN, UID, nickname)
+        2. Session ID for this conversation
+        3. Available MCP tools from the client
+        4. Client version and metadata
+        
+        The stored configuration is used to:
+        - Populate USER.md template with identity info
+        - Enable/disable skills based on available tools
+        - Track client capabilities for future features
+        - Initialize session for the conversation
+        """
+        try:
+            # Update user configuration
+            config = user_config_store.update(
+                user_uin=request.user_uin,
+                user_uid=request.user_uid,
+                user_nick=request.user_nick,
+                available_mcp_tools=request.available_mcp_tools,
+                client_version=request.client_version,
+                client_metadata=request.client_metadata,
+            )
+            
+            # Initialize session for this conversation
+            session = session_store.get_or_create(request.user_uin, request.session_id)
+            
+            # Initialize user's prompt files with identity
+            prompt_store.get_prompt(
+                request.user_uin,
+                "USER.md",
+                user_uid=request.user_uid,
+                user_nick=request.user_nick,
+            )
+            
+            # Get available and enabled skills
+            available_skills = planner.list_available_skills()
+            enabled_skills = planner.list_enabled_skills(request.available_mcp_tools)
+            
+            return InitResponse(
+                status="success",
+                message=f"用户初始化成功: {request.user_nick or request.user_uin}",
+                user_uin=request.user_uin,
+                user_identity_initialized=True,
+                available_skills=available_skills,
+                enabled_skills=enabled_skills,
+            )
+            
+        except Exception as e:
+            return InitResponse(
+                status="error",
+                message="初始化失败",
+                user_uin=request.user_uin,
+                error=str(e),
+            )
 
     @router.post("/query")
     async def query(request: QueryRequest):
         session = session_store.get_or_create(request.user_uin, request.session_id)
         session.query = request.query
         session.current_time = request.current_time
+        
+        # Initialize user's prompts with identity info if first access
+        prompt_store.get_prompt(
+            request.user_uin,
+            "USER.md",
+            user_uid=request.user_uid,
+            user_nick=request.user_nick,
+        )
 
         planned = planner.plan_initial(request.query)
         calls = planner.build_calls(planned, session.round_count)
