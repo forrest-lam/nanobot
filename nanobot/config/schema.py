@@ -311,7 +311,7 @@ class QQChatCompatConfig(Base):
     """QQChatAgentServer 协议兼容服务配置。"""
 
     enabled: bool = False
-    host: str = "127.0.0.1"
+    host: str = "0.0.0.0"
     port: int = 18990
     session_ttl_seconds: int = 1800
     max_sessions: int = 500

@@ -112,36 +112,38 @@ class AgentLoop:
         self._register_default_tools()
 
     def _register_default_tools(self) -> None:
-        """Register the default set of tools."""
+        """Register the default set of tools (always enabled)."""
         allowed_dir = self.workspace if self.restrict_to_workspace else None
         for cls in (ReadFileTool, WriteFileTool, EditFileTool, ListDirTool):
-            self.tools.register(cls(workspace=self.workspace, allowed_dir=allowed_dir))
-        self.tools.register(ExecTool(
-            working_dir=str(self.workspace),
-            timeout=self.exec_config.timeout,
-            restrict_to_workspace=self.restrict_to_workspace,
-            path_append=self.exec_config.path_append,
-        ))
-        self.tools.register(WebSearchTool(config=self.web_search_config, proxy=self.web_proxy))
-        self.tools.register(WebFetchTool(proxy=self.web_proxy))
-        self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
-        self.tools.register(SpawnTool(manager=self.subagents))
+            self.tools.register(cls(workspace=self.workspace, allowed_dir=allowed_dir), always=True)
+        self.tools.register(
+            ExecTool(
+                working_dir=str(self.workspace),
+                timeout=self.exec_config.timeout,
+                restrict_to_workspace=self.restrict_to_workspace,
+                path_append=self.exec_config.path_append,
+            ),
+            always=True,
+        )
+        self.tools.register(WebSearchTool(config=self.web_search_config, proxy=self.web_proxy), always=True)
+        self.tools.register(WebFetchTool(proxy=self.web_proxy), always=True)
+        self.tools.register(MessageTool(send_callback=self.bus.publish_outbound), always=True)
+        self.tools.register(SpawnTool(manager=self.subagents), always=True)
         if self.cron_service:
-            self.tools.register(CronTool(self.cron_service))
+            self.tools.register(CronTool(self.cron_service), always=True)
 
     async def _connect_mcp(self) -> None:
-        """Connect to configured MCP servers (one-time, lazy)."""
+        """Initialize MCP infrastructure (lazy, does not connect servers)."""
         if self._mcp_connected or self._mcp_connecting or not self._mcp_servers:
             return
         self._mcp_connecting = True
-        from nanobot.agent.tools.mcp import connect_mcp_servers
         try:
             self._mcp_stack = AsyncExitStack()
             await self._mcp_stack.__aenter__()
-            await connect_mcp_servers(self._mcp_servers, self.tools, self._mcp_stack)
             self._mcp_connected = True
+            logger.info("MCP infrastructure initialized (lazy mode, {} servers configured)", len(self._mcp_servers))
         except BaseException as e:
-            logger.error("Failed to connect MCP servers (will retry next message): {}", e)
+            logger.error("Failed to initialize MCP infrastructure: {}", e)
             if self._mcp_stack:
                 try:
                     await self._mcp_stack.aclose()
@@ -150,6 +152,76 @@ class AgentLoop:
                 self._mcp_stack = None
         finally:
             self._mcp_connecting = False
+
+    async def ensure_mcp_server(self, server_name: str) -> bool:
+        """Ensure a specific MCP server is connected.
+        
+        Args:
+            server_name: Name of the MCP server to connect
+            
+        Returns:
+            True if server is now connected, False otherwise
+        """
+        if not self._mcp_connected:
+            await self._connect_mcp()
+            if not self._mcp_connected:
+                return False
+
+        if server_name in self._connected_mcp_servers:
+            return True
+
+        if server_name not in self._mcp_servers:
+            logger.warning("MCP server '{}' not found in configuration", server_name)
+            return False
+
+        cfg = self._mcp_servers[server_name]
+        from nanobot.agent.tools.mcp import connect_single_mcp_server
+
+        try:
+            tool_count = await connect_single_mcp_server(
+                server_name, cfg, self.tools, self._mcp_stack, enabled=False
+            )
+            if tool_count > 0:
+                self._connected_mcp_servers.add(server_name)
+                logger.info("MCP server '{}' connected on-demand, {} tools registered", server_name, tool_count)
+                return True
+            return False
+        except Exception as e:
+            logger.error("Failed to connect MCP server '{}': {}", server_name, e)
+            return False
+
+    async def enable_tools_from_skill(self, skill_metadata: dict) -> int:
+        """Enable tools required by a skill.
+        
+        Connects necessary MCP servers on-demand and enables the tools.
+        
+        Args:
+            skill_metadata: Skill metadata containing compatTools list
+            
+        Returns:
+            Number of tools successfully enabled
+        """
+        compat_tools = skill_metadata.get("nanobot", {}).get("compatTools", [])
+        if not compat_tools:
+            return 0
+
+        enabled_count = 0
+        for tool_name in compat_tools:
+            # Check if this is an MCP tool (format: mcp_servername_toolname)
+            if tool_name.startswith("mcp_") and "_" in tool_name[4:]:
+                parts = tool_name.split("_", 2)
+                if len(parts) >= 2:
+                    server_name = parts[1]
+                    if await self.ensure_mcp_server(server_name):
+                        enabled_count += self.tools.enable(tool_name)
+                    else:
+                        logger.warning("Failed to connect MCP server '{}' for tool '{}'", server_name, tool_name)
+            else:
+                # Non-MCP tool, just enable it
+                enabled_count += self.tools.enable(tool_name)
+
+        logger.info("Enabled {} tools from skill compatTools", enabled_count)
+        return enabled_count
 
     def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
         """Update context for all tools that need routing info."""

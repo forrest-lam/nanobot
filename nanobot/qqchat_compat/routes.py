@@ -15,6 +15,7 @@ from fastapi.responses import StreamingResponse
 from nanobot.qqchat_compat._channel import CHANNEL
 from nanobot.qqchat_compat.memory_store import AccountMemoryStore
 from nanobot.qqchat_compat.planner import SkillDrivenPlanner
+from nanobot.qqchat_compat.prompt_store import UserPromptStore
 from nanobot.qqchat_compat.schemas import CompatResponse, QueryRequest, SearchResultRequest, SessionSnapshot
 from nanobot.qqchat_compat.session_store import SessionStore
 from nanobot.qqchat_compat.tool_policy import ToolPolicy
@@ -28,6 +29,7 @@ def create_router(
     *,
     session_store: SessionStore,
     memory_store: AccountMemoryStore,
+    prompt_store: UserPromptStore,
     planner: SkillDrivenPlanner,
     policy: ToolPolicy,
 ) -> APIRouter:
@@ -61,17 +63,23 @@ def create_router(
         session.round_count += 1
         session_store.save(session)
 
+        hint = planner.build_progress_hint(allowed_calls)
         response = CompatResponse(
             status="need_search",
             need_search=True,
             session_id=request.session_id,
             user_uin=request.user_uin,
             mcp_calls=allowed_calls,
+            progress_hint=hint,
         )
 
         if request.stream:
             async def _stream() -> AsyncGenerator[str, None]:
-                yield _sse_event({"type": "need_search", "mcp_calls": [c.model_dump() for c in allowed_calls]})
+                yield _sse_event({
+                    "type": "need_search",
+                    "progress_hint": hint,
+                    "mcp_calls": [c.model_dump() for c in allowed_calls],
+                })
                 yield _sse_event({"type": "done"})
             return StreamingResponse(_stream(), media_type="text/event-stream")
 
@@ -85,7 +93,11 @@ def create_router(
 
         session.search_results.extend(request.search_results)
 
-        final_answer = planner.summarize_results(session.query, session.search_results)
+        final_answer = planner.summarize_results(
+            session.query,
+            session.search_results,
+            user_uin=session.user_uin,
+        )
         if final_answer.startswith("暂未检索") or final_answer.startswith("检索已完成，但结果为空"):
             follow_up = planner.plan_follow_up(session.round_count, session.query)
             follow_calls = [c for c in planner.build_calls(follow_up, session.round_count) if policy.is_allowed(c.tool)]
@@ -94,16 +106,22 @@ def create_router(
                 session.status = "need_search"
                 session.round_count += 1
                 session_store.save(session)
+                follow_hint = planner.build_progress_hint(follow_calls, is_follow_up=True)
                 resp = CompatResponse(
                     status="need_search",
                     need_search=True,
                     session_id=request.session_id,
                     user_uin=request.user_uin,
                     mcp_calls=follow_calls,
+                    progress_hint=follow_hint,
                 )
                 if request.stream:
                     async def _ns_stream() -> AsyncGenerator[str, None]:
-                        yield _sse_event({"type": "need_search", "mcp_calls": [c.model_dump() for c in follow_calls]})
+                        yield _sse_event({
+                            "type": "need_search",
+                            "progress_hint": follow_hint,
+                            "mcp_calls": [c.model_dump() for c in follow_calls],
+                        })
                         yield _sse_event({"type": "done"})
                     return StreamingResponse(_ns_stream(), media_type="text/event-stream")
                 return resp
@@ -111,6 +129,17 @@ def create_router(
         session.status = "final_answer"
         session.pending_calls = []
         session_store.save(session)
+
+        # Read memory *before* appending current record so we get prior context
+        prior_records = memory_store.read_records(session.user_uin)
+
+        followup = planner.suggest_followup(
+            query=session.query,
+            memory_records=prior_records,
+        )
+        if followup:
+            final_answer = f"{final_answer}\n\n---\n💡 {followup}"
+
         memory_store.append_record(
             user_uin=session.user_uin,
             query=session.query,
@@ -154,5 +183,45 @@ def create_router(
             created_at=session.created_at,
             updated_at=session.updated_at,
         )
+
+    @router.get("/prompt/{user_uin}")
+    async def get_user_prompts(user_uin: str):
+        """Get all prompt files for a user."""
+        prompts = prompt_store.get_all_prompts(user_uin)
+        return {"user_uin": user_uin, "prompts": prompts}
+
+    @router.post("/prompt/{user_uin}/{prompt_name}")
+    async def update_user_prompt(user_uin: str, prompt_name: str, payload: dict):
+        """Update a specific prompt file.
+        
+        Body: {"content": "...", "append": false}
+        """
+        if prompt_name not in UserPromptStore.TEMPLATE_FILES:
+            raise HTTPException(status_code=400, detail=f"Invalid prompt name: {prompt_name}")
+        
+        content = payload.get("content", "")
+        append = payload.get("append", False)
+        
+        prompt_store.update_prompt(user_uin, prompt_name, content, append=append)
+        return {"status": "ok", "user_uin": user_uin, "prompt_name": prompt_name}
+
+    @router.post("/prompt/{user_uin}/personality")
+    async def add_personality_trait(user_uin: str, payload: dict):
+        """Add a personality trait to user's SOUL.md.
+        
+        Body: {"trait": "喜欢简洁的回答"}
+        """
+        trait = payload.get("trait", "").strip()
+        if not trait:
+            raise HTTPException(status_code=400, detail="Trait cannot be empty")
+        
+        prompt_store.append_personality(user_uin, trait)
+        return {"status": "ok", "user_uin": user_uin, "trait": trait}
+
+    @router.delete("/prompt/{user_uin}")
+    async def reset_user_prompts(user_uin: str):
+        """Reset all prompts to defaults."""
+        prompt_store.delete_user_prompts(user_uin)
+        return {"status": "ok", "user_uin": user_uin, "message": "Prompts reset to defaults"}
 
     return router

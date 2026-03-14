@@ -48,6 +48,7 @@ class CompatResponse(BaseModel):
     user_uin: str
     need_search: bool = False
     mcp_calls: list[ToolCall] = Field(default_factory=list)
+    progress_hint: str = ""
     final_answer: str = ""
     error: str = ""
 

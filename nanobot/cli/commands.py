@@ -555,7 +555,7 @@ def qqchat_api(
     resolved_port = port if port is not None else qq_cfg.port
 
     console.print(f"{__logo__} Starting QQChat compat API on {resolved_host}:{resolved_port}...")
-    app_instance = create_app(qq_cfg, runtime_config.workspace_path)
+    app_instance = create_app(qq_cfg, runtime_config.workspace_path, runtime_config.tools)
     uvicorn.run(app_instance, host=resolved_host, port=resolved_port)
 
 
@@ -619,7 +619,7 @@ def agent(
             from contextlib import nullcontext
             return nullcontext()
         # Animated spinner is safe to use with prompt_toolkit input handling
-        return console.status("[dim]nanobot is thinking...[/dim]", spinner="dots")
+        return console.status("[dim]正在思考...[/dim]", spinner="dots")
 
     async def _cli_progress(content: str, *, tool_hint: bool = False) -> None:
         ch = agent_loop.channels_config

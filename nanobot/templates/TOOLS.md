@@ -1,15 +1,39 @@
-# Tool Usage Notes
+# Tools Preferences
 
-Tool signatures are provided automatically via function calling.
-This file documents non-obvious constraints and usage patterns.
+This file defines your preferred tools and their usage patterns.
 
-## exec — Safety Limits
+## Search Preferences
 
-- Commands have a configurable timeout (default 60s)
-- Dangerous commands are blocked (rm -rf, format, dd, shutdown, etc.)
-- Output is truncated at 10,000 characters
-- `restrictToWorkspace` config can limit file access to the workspace
+### Message Search
+- **Default Keywords**: (preferred keywords for searching)
+- **Time Range**: (preferred time range, e.g., "last 7 days")
+- **Scope**: (all chats, specific groups, etc.)
 
-## cron — Scheduled Reminders
+### Contact Search
+- **Include**: (contacts, groups, both)
+- **Filter**: (active only, archived, all)
 
-- Please refer to cron skill for usage.
+## Output Preferences
+
+### Result Format
+- [ ] Brief summaries
+- [ ] Detailed with context
+- [ ] Timeline view
+- [ ] Group by conversation
+
+### Information Display
+- [ ] Show timestamps
+- [ ] Show sender names
+- [ ] Show chat context
+- [ ] Show related messages
+
+## Tool Priorities
+
+When multiple tools are available:
+1. (your preferred tool)
+2. (fallback tool)
+3. (last resort)
+
+---
+
+*This file is automatically created for each user. Customize it to personalize your assistant's behavior.*
