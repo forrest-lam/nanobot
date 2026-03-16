@@ -4,7 +4,7 @@ import hashlib
 import os
 import secrets
 import string
-from typing import Any
+from typing import Any, AsyncGenerator
 
 import json_repair
 import litellm
@@ -282,6 +282,144 @@ class LiteLLMProvider(LLMProvider):
             # Return error as content for graceful handling
             return LLMResponse(
                 content=f"Error calling LLM: {str(e)}",
+                finish_reason="error",
+            )
+
+    async def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+        reasoning_effort: str | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+    ) -> AsyncGenerator[LLMResponse, None]:
+        """
+        Stream chat completion via LiteLLM.
+
+        Args:
+            messages: List of message dicts with 'role' and 'content'.
+            tools: Optional list of tool definitions in OpenAI format.
+            model: Model identifier (e.g., 'anthropic/claude-sonnet-4-5').
+            max_tokens: Maximum tokens in response.
+            temperature: Sampling temperature.
+
+        Yields:
+            LLMResponse chunks with incremental content and/or tool calls.
+        """
+        original_model = model or self.default_model
+        model = self._resolve_model(original_model)
+        extra_msg_keys = self._extra_msg_keys(original_model, model)
+
+        if self._supports_cache_control(original_model):
+            messages, tools = self._apply_cache_control(messages, tools)
+
+        max_tokens = max(1, max_tokens)
+
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": self._sanitize_messages(self._sanitize_empty_content(messages), extra_keys=extra_msg_keys),
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": True,  # Enable streaming
+        }
+
+        self._apply_model_overrides(model, kwargs)
+
+        if self._langsmith_enabled:
+            kwargs.setdefault("callbacks", []).append("langsmith")
+
+        if self.api_key:
+            kwargs["api_key"] = self.api_key
+
+        if self.api_base:
+            kwargs["api_base"] = self.api_base
+
+        if self.extra_headers:
+            kwargs["extra_headers"] = self.extra_headers
+        
+        if reasoning_effort:
+            kwargs["reasoning_effort"] = reasoning_effort
+            kwargs["drop_params"] = True
+        
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = tool_choice or "auto"
+
+        try:
+            import time
+            stream = await acompletion(**kwargs)
+            accumulated_content = ""
+            accumulated_tool_calls: list[dict[str, Any]] = []
+            
+            logger.debug("Stream started at {}", time.time())
+            async for chunk in stream:
+                # logger.debug("Received chunk from LiteLLM at {}", time.time())
+                if not chunk.choices:
+                    continue
+                    
+                delta = chunk.choices[0].delta
+                finish_reason = chunk.choices[0].finish_reason
+                
+                # Handle content delta
+                if hasattr(delta, "content") and delta.content:
+                    accumulated_content += delta.content
+                    yield LLMResponse(
+                        content=delta.content,
+                        tool_calls=[],
+                        finish_reason=finish_reason or "streaming",
+                    )
+                
+                # Handle tool calls delta
+                if hasattr(delta, "tool_calls") and delta.tool_calls:
+                    for tc_delta in delta.tool_calls:
+                        idx = tc_delta.index
+                        
+                        # Ensure we have enough slots
+                        while len(accumulated_tool_calls) <= idx:
+                            accumulated_tool_calls.append({
+                                "id": "",
+                                "name": "",
+                                "arguments": "",
+                            })
+                        
+                        if hasattr(tc_delta, "id") and tc_delta.id:
+                            accumulated_tool_calls[idx]["id"] = tc_delta.id
+                        
+                        if hasattr(tc_delta, "function"):
+                            if tc_delta.function.name:
+                                accumulated_tool_calls[idx]["name"] = tc_delta.function.name
+                            if tc_delta.function.arguments:
+                                accumulated_tool_calls[idx]["arguments"] += tc_delta.function.arguments
+                
+                # Final chunk with tool calls
+                if finish_reason and accumulated_tool_calls:
+                    tool_calls = []
+                    for tc_raw in accumulated_tool_calls:
+                        if tc_raw["name"]:  # Only include if we have a name
+                            args = tc_raw["arguments"]
+                            if isinstance(args, str):
+                                try:
+                                    args = json_repair.loads(args)
+                                except Exception:
+                                    args = {}
+                            
+                            tool_calls.append(ToolCallRequest(
+                                id=_short_tool_id(),
+                                name=tc_raw["name"],
+                                arguments=args,
+                            ))
+                    
+                    if tool_calls:
+                        yield LLMResponse(
+                            content=accumulated_content or None,
+                            tool_calls=tool_calls,
+                            finish_reason=finish_reason,
+                        )
+        except Exception as e:
+            yield LLMResponse(
+                content=f"Error streaming from LLM: {str(e)}",
                 finish_reason="error",
             )
 

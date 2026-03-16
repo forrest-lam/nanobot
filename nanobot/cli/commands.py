@@ -550,12 +550,19 @@ def qqchat_api(
 
     runtime_config = _load_runtime_config(config, workspace)
     qq_cfg = runtime_config.qqchat_compat
+    provider = _make_provider(runtime_config)
 
     resolved_host = host or qq_cfg.host
     resolved_port = port if port is not None else qq_cfg.port
 
     console.print(f"{__logo__} Starting QQChat compat API on {resolved_host}:{resolved_port}...")
-    app_instance = create_app(qq_cfg, runtime_config.workspace_path, runtime_config.tools)
+    app_instance = create_app(
+        config=qq_cfg,
+        workspace=runtime_config.workspace_path,
+        provider=provider,
+        full_config=runtime_config,
+        tools_config=runtime_config.tools,
+    )
     uvicorn.run(app_instance, host=resolved_host, port=resolved_port)
 
 

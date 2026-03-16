@@ -14,7 +14,7 @@ from nanobot.qqchat_compat.schemas import ToolCall
 
 
 _SKILL_TOOL_PATTERN = re.compile(r"\b(search_chats|search_messages|get_recent_messages|get_recent_chats|get_profiles)\b")
-_WORD_PATTERN = re.compile(r"[\u4e00-\u9fffA-Za-z0-9_]{2,20}")
+_WORD_PATTERN = re.compile(r"[\u4e00-\u9fff]{2,8}|[A-Za-z0-9_]{2,20}")
 _METADATA_PATTERN = re.compile(r"""metadata:\s*['"]({.*?})['"]""", re.MULTILINE)
 
 
@@ -89,12 +89,38 @@ class SkillDrivenPlanner:
         return mapping
 
     def _extract_keywords(self, query: str) -> list[str]:
+        # 特殊处理：如果查询包含"在哪个群"、"在群"等，先提取人名
+        person_name = None
+        if "在哪个群" in query or "哪个群" in query:
+            # 提取人名（通常在前面）
+            parts = query.split("在哪个群")[0].strip()
+            if parts and len(parts) <= 4:  # 人名通常不超过4个字
+                person_name = parts
+        
         words = _WORD_PATTERN.findall(query)
         seen: set[str] = set()
         out: list[str] = []
+        
+        # 如果识别出人名，优先添加
+        if person_name:
+            out.append(person_name)
+            seen.add(person_name)
+        
+        # 停用词列表（过滤无意义的词和常见短语）
+        stopwords = {
+            "你好", "我是", "可以", "帮你", "根据", "以下", "需要", "要不要",
+            "聊天记录", "最新", "消息", "这个", "那个", "什么", "怎么",
+            "目前", "如下", "预计", "将", "已完成", "已经", "正在", "在以下",
+            "中", "的", "个", "了", "吗", "呢", "啊", "在哪个群", "在哪", "个群中", "张三在以下"
+        }
+        
         for w in words:
             token = w.strip()
-            if len(token) < 2 or token in seen:
+            # 更严格的过滤：长度限制和停用词检查
+            if len(token) < 2 or len(token) > 8 or token in seen or token in stopwords:
+                continue
+            # 过滤纯数字
+            if token.isdigit():
                 continue
             seen.add(token)
             out.append(token)
@@ -244,38 +270,6 @@ class SkillDrivenPlanner:
                 )
             )
         return calls
-
-    def suggest_followup(
-        self,
-        query: str,
-        memory_records: list[dict[str, Any]],
-    ) -> str:
-        """Return a single follow-up suggestion based on user memory and current context.
-
-        Priority: memory-based (continue a prior topic) > query-based (drill down).
-        The suggestion is appended to final_answer so it persists in conversation
-        history, enabling the user to confirm with a short reply like "好的" / "需要".
-        """
-        keywords = self._extract_keywords(query)
-        kw_first = keywords[0] if keywords else query[:10]
-
-        # Prefer memory-based: revisit a recent *different* topic
-        if memory_records:
-            for rec in reversed(memory_records):
-                prev_q = rec.get("query", "").strip()
-                if prev_q and prev_q != query.strip():
-                    prev_kws = self._extract_keywords(prev_q)
-                    prev_display = prev_kws[0] if prev_kws else prev_q[:10]
-                    return f"继续上次的话题，帮你看看「{prev_display}」有什么新消息？"
-
-        # Fallback: derive from current query
-        if self._contains_any(query, ("说了什么", "聊了什么", "发了什么", "消息", "聊天")):
-            return f"需要我帮你总结一下{kw_first}最近讨论的话题吗？"
-        if self._contains_any(query, ("谁", "联系人", "好友")):
-            return f"要不要看看你和{kw_first}最近聊了些什么？"
-        if self._contains_any(query, ("群", "群聊")):
-            return f"需要我帮你看看{kw_first}群里最近在聊什么吗？"
-        return f"需要我帮你进一步总结「{kw_first}」相关的聊天要点吗？"
 
     def summarize_results(
         self,

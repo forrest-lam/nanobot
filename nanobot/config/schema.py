@@ -312,7 +312,7 @@ class QQChatCompatConfig(Base):
 
     enabled: bool = False
     host: str = "0.0.0.0"
-    port: int = 18990
+    port: int = 8990
     session_ttl_seconds: int = 1800
     max_sessions: int = 500
     allowed_tools: list[str] = Field(default_factory=list)
@@ -321,7 +321,7 @@ class QQChatCompatConfig(Base):
 class WebSearchConfig(Base):
     """Web search tool configuration."""
 
-    provider: str = "brave"  # brave, tavily, duckduckgo, searxng, jina
+    provider: str = "brave"  # brave, tavily, duckduckgo, searxng, jina, mcp
     api_key: str = ""
     base_url: str = ""  # SearXNG base URL
     max_results: int = 5
@@ -370,6 +370,7 @@ class Config(BaseSettings):
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
+    env: dict[str, str] = Field(default_factory=dict)  # Environment variables (e.g. TAVILY_API_KEY)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     qqchat_compat: QQChatCompatConfig = Field(default_factory=QQChatCompatConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)

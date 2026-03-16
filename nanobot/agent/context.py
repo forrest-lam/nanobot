@@ -19,13 +19,18 @@ class ContextBuilder:
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"]
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
 
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Path, channel: str | None = None):
         self.workspace = workspace
+        self.channel = channel  # Save channel for conditional logic
         self.memory = MemoryStore(workspace)
-        self.skills = SkillsLoader(workspace)
+        self.skills = SkillsLoader(workspace, channel=channel)
 
     def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
         """Build the system prompt from identity, bootstrap files, memory, and skills."""
+        # Use minimal prompt for qqchat_http to reduce context size
+        if self.channel == "qqchat_http":
+            return self._build_qqchat_prompt()
+        
         parts = [self._get_identity()]
 
         bootstrap = self._load_bootstrap_files()
@@ -52,6 +57,61 @@ Skills with available="false" need dependencies installed first - you can try in
 {skills_summary}""")
 
         return "\n\n---\n\n".join(parts)
+    
+    def _build_qqchat_prompt(self) -> str:
+        """Build a minimal system prompt for qqchat_http channel.
+        
+        Reduces context size by:
+        - Using concise identity (no bootstrap files)
+        - Including channel-specific skills and always-on skills
+        - No skills summary (no progressive loading)
+        - Keeping memory context
+        """
+        parts = [self._get_qqchat_identity()]
+        
+        # Include memory
+        memory = self.memory.get_memory_context()
+        if memory:
+            parts.append(f"# Memory\n\n{memory}")
+        
+        # Include channel-specific + always-on skills
+        # list_skills() with channel set will auto-filter channel-specific skills
+        channel_skills = [s["name"] for s in self.skills.list_skills(filter_unavailable=True)]
+        if channel_skills:
+            skills_content = self.skills.load_skills_for_context(channel_skills)
+            if skills_content:
+                parts.append(f"# Active Skills\n\n{skills_content}")
+        
+        return "\n\n---\n\n".join(parts)
+    
+    def _get_qqchat_identity(self) -> str:
+        """Minimal identity for qqchat_http channel."""
+        return """# QQ AI Assistant
+
+You are an AI assistant focused on helping users query and manage their QQ data.
+
+## Core Capabilities
+- **QQ Chat Search**: Search contacts, groups, and message history
+- **Profile Lookup**: Get user profile information
+- **Message Analysis**: Analyze chat patterns and relationships
+
+## Tool Usage Guidelines
+1. Use `search_chats` to find contacts/groups by name or keywords
+2. Use `search_messages` or `get_recent_messages` to query chat history
+3. Use `get_profiles` to get detailed user information
+4. Use `web_search` when QQ data is insufficient
+
+## Response Rules
+- Always respond in Chinese (简体中文)
+- Be concise and direct
+- Show UIDs only when explicitly requested
+- Summarize findings when analyzing multiple messages
+
+## Context
+- User's QQ data is available through MCP tools
+- All searches are local and private
+- You have access to recent chat history and contacts
+"""
 
     def _get_identity(self) -> str:
         """Get the core identity section."""

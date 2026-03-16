@@ -27,6 +27,7 @@ class CompatSession:
     round_count: int = 0
     pending_calls: list[ToolCall] = field(default_factory=list)
     search_results: list[dict[str, Any]] = field(default_factory=list)
+    agent_waiting_answer: bool = False  # Agent Loop mode: waiting for tool execution completion
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 

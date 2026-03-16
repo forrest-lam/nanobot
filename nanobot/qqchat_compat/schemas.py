@@ -76,6 +76,8 @@ class InitResponse(BaseModel):
     user_identity_initialized: bool = False
     available_skills: list[str] = Field(default_factory=list)
     enabled_skills: list[str] = Field(default_factory=list)
+    available_mcp_tools: list[str] = Field(default_factory=list, description="Actually available MCP tools on server")
+    enabled_mcp_tools: list[str] = Field(default_factory=list, description="MCP tools enabled for this channel")
     error: str = ""
 
 

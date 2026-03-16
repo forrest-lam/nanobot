@@ -9,7 +9,7 @@ import re
 import sys
 from contextlib import AsyncExitStack
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable
 
 from loguru import logger
 
@@ -63,6 +63,8 @@ class AgentLoop:
         session_manager: SessionManager | None = None,
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
+        allowed_tools: set[str] | None = None,
+        channel: str | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig, WebSearchConfig
 
@@ -79,7 +81,7 @@ class AgentLoop:
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
 
-        self.context = ContextBuilder(workspace)
+        self.context = ContextBuilder(workspace, channel=channel)
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
         self.subagents = SubagentManager(
@@ -98,8 +100,10 @@ class AgentLoop:
         self._mcp_stack: AsyncExitStack | None = None
         self._mcp_connected = False
         self._mcp_connecting = False
+        self._connected_mcp_servers: set[str] = set()  # Track connected MCP servers
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
         self._processing_lock = asyncio.Lock()
+        self._allowed_tools = allowed_tools  # Tool whitelist for restricted channels
         self.memory_consolidator = MemoryConsolidator(
             workspace=workspace,
             provider=provider,
@@ -112,25 +116,37 @@ class AgentLoop:
         self._register_default_tools()
 
     def _register_default_tools(self) -> None:
-        """Register the default set of tools (always enabled)."""
+        """Register the default set of tools (respecting allowed_tools whitelist)."""
         allowed_dir = self.workspace if self.restrict_to_workspace else None
+        
+        # Register tools but respect whitelist if set
+        tools_to_register = []
         for cls in (ReadFileTool, WriteFileTool, EditFileTool, ListDirTool):
-            self.tools.register(cls(workspace=self.workspace, allowed_dir=allowed_dir), always=True)
-        self.tools.register(
+            tool = cls(workspace=self.workspace, allowed_dir=allowed_dir)
+            tools_to_register.append(tool)
+        
+        tools_to_register.append(
             ExecTool(
                 working_dir=str(self.workspace),
                 timeout=self.exec_config.timeout,
                 restrict_to_workspace=self.restrict_to_workspace,
                 path_append=self.exec_config.path_append,
-            ),
-            always=True,
+            )
         )
-        self.tools.register(WebSearchTool(config=self.web_search_config, proxy=self.web_proxy), always=True)
-        self.tools.register(WebFetchTool(proxy=self.web_proxy), always=True)
-        self.tools.register(MessageTool(send_callback=self.bus.publish_outbound), always=True)
-        self.tools.register(SpawnTool(manager=self.subagents), always=True)
+        tools_to_register.append(WebSearchTool(config=self.web_search_config, proxy=self.web_proxy, registry=self.tools))
+        tools_to_register.append(WebFetchTool(proxy=self.web_proxy))
+        tools_to_register.append(MessageTool(send_callback=self.bus.publish_outbound))
+        tools_to_register.append(SpawnTool(manager=self.subagents))
         if self.cron_service:
-            self.tools.register(CronTool(self.cron_service), always=True)
+            tools_to_register.append(CronTool(self.cron_service))
+        
+        # Register tools, but only enable if in whitelist (or no whitelist)
+        for tool in tools_to_register:
+            enabled = self._allowed_tools is None or tool.name in self._allowed_tools
+            # Don't set always=True, let whitelist control enablement
+            self.tools.register(tool, enabled=enabled, always=False)
+            if not enabled:
+                logger.debug("Tool '{}' registered but disabled (not in whitelist)", tool.name)
 
     async def _connect_mcp(self) -> None:
         """Initialize MCP infrastructure (lazy, does not connect servers)."""
@@ -318,6 +334,155 @@ class AgentLoop:
             )
 
         return final_content, tools_used, messages
+
+    async def _run_agent_loop_stream(
+        self,
+        initial_messages: list[dict],
+        on_progress: Callable[..., Awaitable[None]] | None = None,
+    ) -> AsyncGenerator[tuple[str, bool, list[dict]], None]:
+        """
+        Run agent loop with streaming.
+        
+        Yields:
+            Tuple of (content_chunk, is_final, messages)
+        """
+        messages = initial_messages
+        iteration = 0
+        final_content_parts = []
+
+        while iteration < self.max_iterations:
+            iteration += 1
+            tool_defs = self.tools.get_definitions()
+
+            # Try streaming first
+            try:
+                stream = self.provider.chat_stream(
+                    messages=messages,
+                    tools=tool_defs,
+                    model=self.model,
+                )
+                
+                accumulated_content = ""
+                has_tool_calls = False
+                tool_calls_list = []
+                last_response = None
+                
+                async for chunk in stream:
+                    last_response = chunk
+                    
+                    # Stream content chunks
+                    if chunk.content:
+                        accumulated_content += chunk.content
+                        final_content_parts.append(chunk.content)
+                        # logger.debug("Streaming chunk: {} chars", len(chunk.content))
+                        yield (chunk.content, False, messages)
+                    
+                    # Collect tool calls
+                    if chunk.tool_calls:
+                        has_tool_calls = True
+                        tool_calls_list = chunk.tool_calls
+                
+                # After stream completes, handle tool calls
+                if has_tool_calls and tool_calls_list:
+                    if on_progress:
+                        thought = self._strip_think(accumulated_content)
+                        if thought:
+                            await on_progress(thought)
+                        await on_progress(self._tool_hint(tool_calls_list), tool_hint=True)
+                    
+                    tool_call_dicts = [tc.to_openai_tool_call() for tc in tool_calls_list]
+                    messages = self.context.add_assistant_message(
+                        messages,
+                        accumulated_content,
+                        tool_call_dicts,
+                        reasoning_content=last_response.reasoning_content if last_response else None,
+                        thinking_blocks=last_response.thinking_blocks if last_response else None,
+                    )
+                    
+                    # Execute tools
+                    for tool_call in tool_calls_list:
+                        args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                        logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
+                        result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                        messages = self.context.add_tool_result(
+                            messages, tool_call.id, tool_call.name, result
+                        )
+                else:
+                    # No tool calls, final response
+                    clean = self._strip_think(accumulated_content)
+                    
+                    if last_response and last_response.finish_reason == "error":
+                        logger.error("LLM returned error: {}", (clean or "")[:200])
+                        error_msg = clean or "Sorry, I encountered an error calling the AI model."
+                        yield (error_msg, True, messages)
+                        return
+                    
+                    messages = self.context.add_assistant_message(
+                        messages,
+                        clean,
+                        reasoning_content=last_response.reasoning_content if last_response else None,
+                        thinking_blocks=last_response.thinking_blocks if last_response else None,
+                    )
+                    yield ("", True, messages)
+                    return
+                    
+            except Exception as e:
+                logger.exception("Error in streaming mode, falling back to non-streaming")
+                # Fallback to non-streaming
+                response = await self.provider.chat_with_retry(
+                    messages=messages,
+                    tools=tool_defs,
+                    model=self.model,
+                )
+                
+                if response.has_tool_calls:
+                    if on_progress:
+                        thought = self._strip_think(response.content)
+                        if thought:
+                            await on_progress(thought)
+                        await on_progress(self._tool_hint(response.tool_calls), tool_hint=True)
+                    
+                    tool_call_dicts = [tc.to_openai_tool_call() for tc in response.tool_calls]
+                    messages = self.context.add_assistant_message(
+                        messages, response.content, tool_call_dicts,
+                        reasoning_content=response.reasoning_content,
+                        thinking_blocks=response.thinking_blocks,
+                    )
+                    
+                    for tool_call in response.tool_calls:
+                        args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                        logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
+                        result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                        messages = self.context.add_tool_result(
+                            messages, tool_call.id, tool_call.name, result
+                        )
+                else:
+                    clean = self._strip_think(response.content)
+                    if response.finish_reason == "error":
+                        logger.error("LLM returned error: {}", (clean or "")[:200])
+                        error_msg = clean or "Sorry, I encountered an error calling the AI model."
+                        yield (error_msg, True, messages)
+                        return
+                    
+                    messages = self.context.add_assistant_message(
+                        messages, clean,
+                        reasoning_content=response.reasoning_content,
+                        thinking_blocks=response.thinking_blocks,
+                    )
+                    if clean:
+                        yield (clean, True, messages)
+                    else:
+                        yield ("", True, messages)
+                    return
+
+        # Max iterations reached
+        if iteration >= self.max_iterations:
+            logger.warning("Max iterations ({}) reached", self.max_iterations)
+            error_msg = (
+                f"I reached the maximum number of tool call iterations ({self.max_iterations}) "
+                "without completing the task. You can try breaking the task into smaller steps."
+            )
+            yield (error_msg, True, messages)
 
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""

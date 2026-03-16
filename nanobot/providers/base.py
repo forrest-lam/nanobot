@@ -4,7 +4,7 @@ import asyncio
 import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, AsyncGenerator
 
 from loguru import logger
 
@@ -183,6 +183,43 @@ class LLMProvider(ABC):
             LLMResponse with content and/or tool calls.
         """
         pass
+
+    @abstractmethod
+    async def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+        reasoning_effort: str | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+    ) -> AsyncGenerator[LLMResponse, None]:
+        """
+        Send a streaming chat completion request.
+        
+        Args:
+            messages: List of message dicts with 'role' and 'content'.
+            tools: Optional list of tool definitions.
+            model: Model identifier (provider-specific).
+            max_tokens: Maximum tokens in response.
+            temperature: Sampling temperature.
+            tool_choice: Tool selection strategy ("auto", "required", or specific tool dict).
+        
+        Yields:
+            LLMResponse chunks with incremental content and/or tool calls.
+        """
+        # Default implementation: yield complete response
+        response = await self.chat(
+            messages=messages,
+            tools=tools,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            reasoning_effort=reasoning_effort,
+            tool_choice=tool_choice,
+        )
+        yield response
 
     @classmethod
     def _is_transient_error(cls, content: str | None) -> bool:

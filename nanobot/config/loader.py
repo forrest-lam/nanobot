@@ -33,6 +33,8 @@ def load_config(config_path: Path | None = None) -> Config:
     Returns:
         Loaded configuration object.
     """
+    import os
+    
     path = config_path or get_config_path()
 
     if path.exists():
@@ -40,7 +42,14 @@ def load_config(config_path: Path | None = None) -> Config:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
             data = _migrate_config(data)
-            return Config.model_validate(data)
+            config = Config.model_validate(data)
+            
+            # Apply environment variables from config.env
+            if config.env:
+                for key, value in config.env.items():
+                    os.environ.setdefault(key, value)
+            
+            return config
         except (json.JSONDecodeError, ValueError) as e:
             print(f"Warning: Failed to load config from {path}: {e}")
             print("Using default configuration.")

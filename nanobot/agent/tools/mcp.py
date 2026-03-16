@@ -14,10 +14,16 @@ from nanobot.agent.tools.registry import ToolRegistry
 class MCPToolWrapper(Tool):
     """Wraps a single MCP server tool as a nanobot Tool."""
 
-    def __init__(self, session, server_name: str, tool_def, tool_timeout: int = 30):
+    def __init__(
+        self, session, server_name: str, tool_def, tool_timeout: int = 30, add_prefix: bool = True
+    ):
         self._session = session
         self._original_name = tool_def.name
-        self._name = f"mcp_{server_name}_{tool_def.name}"
+        # Optionally add prefix to avoid name collisions between different MCP servers
+        if add_prefix:
+            self._name = f"mcp_{server_name}_{tool_def.name}"
+        else:
+            self._name = tool_def.name
         self._description = tool_def.description or tool_def.name
         self._parameters = tool_def.inputSchema or {"type": "object", "properties": {}}
         self._tool_timeout = tool_timeout
@@ -72,7 +78,12 @@ class MCPToolWrapper(Tool):
 
 
 async def connect_single_mcp_server(
-    server_name: str, cfg, registry: ToolRegistry, stack: AsyncExitStack, enabled: bool = False
+    server_name: str,
+    cfg,
+    registry: ToolRegistry,
+    stack: AsyncExitStack,
+    enabled: bool = False,
+    add_prefix: bool = True,
 ) -> int:
     """Connect to a single MCP server and register its tools.
     
@@ -82,6 +93,7 @@ async def connect_single_mcp_server(
         registry: Tool registry to register tools into
         stack: AsyncExitStack for resource management
         enabled: Whether to enable tools immediately (default: False, register but disable)
+        add_prefix: Whether to add 'mcp_{server_name}_' prefix to tool names (default: True)
         
     Returns:
         Number of tools registered
@@ -124,6 +136,23 @@ async def connect_single_mcp_server(
                     auth=auth,
                 )
 
+            try:
+                # Test connection first
+                test_client = httpx_client_factory()
+                response = await test_client.get(cfg.url)
+                logger.debug("MCP server '{}': SSE endpoint status {}", server_name, response.status_code)
+                await test_client.aclose()
+                
+                if response.status_code != 200:
+                    logger.error(
+                        "MCP server '{}': SSE endpoint returned status {}: {}",
+                        server_name, response.status_code, response.text[:200]
+                    )
+                    return 0
+            except Exception as e:
+                logger.error("MCP server '{}': Failed to reach SSE endpoint: {}", server_name, e)
+                return 0
+
             read, write = await stack.enter_async_context(
                 sse_client(cfg.url, httpx_client_factory=httpx_client_factory)
             )
@@ -149,19 +178,35 @@ async def connect_single_mcp_server(
 
         tools = await session.list_tools()
         for tool_def in tools.tools:
-            wrapper = MCPToolWrapper(session, server_name, tool_def, tool_timeout=cfg.tool_timeout)
+            wrapper = MCPToolWrapper(
+                session, server_name, tool_def, tool_timeout=cfg.tool_timeout, add_prefix=add_prefix
+            )
             registry.register(wrapper, enabled=enabled)
-            logger.debug("MCP: registered tool '{}' from server '{}' (enabled={})", wrapper.name, server_name, enabled)
+            logger.debug(
+                "MCP: registered tool '{}' from server '{}' (enabled={})",
+                wrapper.name,
+                server_name,
+                enabled,
+            )
 
         logger.info("MCP server '{}': connected, {} tools registered", server_name, len(tools.tools))
         return len(tools.tools)
     except Exception as e:
-        logger.error("MCP server '{}': failed to connect: {}", server_name, e)
+        import traceback
+        error_details = traceback.format_exc()
+        logger.error(
+            "MCP server '{}': failed to connect: {} ({})\nDetails:\n{}",
+            server_name, type(e).__name__, e, error_details
+        )
         return 0
 
 
 async def connect_mcp_servers(
-    mcp_servers: dict, registry: ToolRegistry, stack: AsyncExitStack, enabled: bool = False
+    mcp_servers: dict,
+    registry: ToolRegistry,
+    stack: AsyncExitStack,
+    enabled: bool = False,
+    add_prefix: bool = True,
 ) -> None:
     """Connect to configured MCP servers and register their tools.
     
@@ -170,6 +215,7 @@ async def connect_mcp_servers(
         registry: Tool registry to register tools into
         stack: AsyncExitStack for resource management
         enabled: Whether to enable tools immediately (default: False for lazy loading)
+        add_prefix: Whether to add 'mcp_{server_name}_' prefix to tool names (default: True)
     """
     for name, cfg in mcp_servers.items():
-        await connect_single_mcp_server(name, cfg, registry, stack, enabled=enabled)
+        await connect_single_mcp_server(name, cfg, registry, stack, enabled=enabled, add_prefix=add_prefix)

@@ -78,17 +78,20 @@ class WebSearchTool(Tool):
         "required": ["query"],
     }
 
-    def __init__(self, config: WebSearchConfig | None = None, proxy: str | None = None):
+    def __init__(self, config: WebSearchConfig | None = None, proxy: str | None = None, registry=None):
         from nanobot.config.schema import WebSearchConfig
 
         self.config = config if config is not None else WebSearchConfig()
         self.proxy = proxy
+        self.registry = registry  # Tool registry for accessing MCP tools
 
     async def execute(self, query: str, count: int | None = None, **kwargs: Any) -> str:
         provider = self.config.provider.strip().lower() or "brave"
         n = min(max(count or self.config.max_results, 1), 10)
 
-        if provider == "duckduckgo":
+        if provider == "mcp":
+            return await self._search_mcp(query, n)
+        elif provider == "duckduckgo":
             return await self._search_duckduckgo(query, n)
         elif provider == "tavily":
             return await self._search_tavily(query, n)
@@ -122,6 +125,97 @@ class WebSearchTool(Tool):
             return _format_results(query, items, n)
         except Exception as e:
             return f"Error: {e}"
+
+    async def _search_mcp(self, query: str, n: int) -> str:
+        """Search using MCP server.
+        
+        This method searches for available MCP search tools in the registry
+        and uses them to perform web search. It will try tools matching patterns like:
+        - mcp_qq-search-MCP-Server_*
+        - mcp_*_search
+        - Any MCP tool with 'search' in the name
+        """
+        if not self.registry:
+            logger.warning("No registry provided, falling back to Tavily")
+            return await self._search_tavily(query, n)
+        
+        # Find search tool from MCP servers
+        # Priority: tools from qq-search-MCP-Server, then other search tools
+        mcp_search_tool = None
+        all_tools = self.registry.tool_names  # Get all registered tools
+        
+        # First try to find qq-search-MCP-Server tools
+        for tool_name in all_tools:
+            if "qq-search-mcp-server" in tool_name.lower() and "search" in tool_name.lower():
+                mcp_search_tool = self.registry.get(tool_name)
+                if mcp_search_tool:
+                    logger.debug("Using MCP search tool: {}", tool_name)
+                    break
+        
+        # Fallback to any MCP search tool
+        if not mcp_search_tool:
+            for tool_name in all_tools:
+                if tool_name.startswith("mcp_") and "search" in tool_name.lower():
+                    mcp_search_tool = self.registry.get(tool_name)
+                    if mcp_search_tool:
+                        logger.debug("Using MCP search tool: {}", tool_name)
+                        break
+        
+        if not mcp_search_tool:
+            logger.warning("No MCP search tool found in registry, falling back to Tavily")
+            return await self._search_tavily(query, n)
+        
+        try:
+            # Call MCP search tool - try common parameter names
+            result = None
+            try:
+                # Try 'query' parameter first
+                result = await mcp_search_tool.execute(query=query, limit=n)
+            except TypeError:
+                # Try 'q' parameter
+                try:
+                    result = await mcp_search_tool.execute(q=query, limit=n)
+                except TypeError:
+                    # Try without limit parameter
+                    try:
+                        result = await mcp_search_tool.execute(query=query)
+                    except TypeError:
+                        result = await mcp_search_tool.execute(q=query)
+            
+            # Try to parse result and format it consistently
+            try:
+                data = json.loads(result)
+                # Assume the MCP returns a structured format with results array
+                if isinstance(data, dict):
+                    # Try various common result field names
+                    items = data.get("results") or data.get("items") or data.get("data") or []
+                elif isinstance(data, list):
+                    items = data
+                else:
+                    # Return raw result if we can't parse structure
+                    return f"Results for: {query}\n\n{result}"
+                
+                # Normalize to common format
+                normalized = []
+                for item in items[:n]:
+                    if isinstance(item, dict):
+                        normalized.append({
+                            "title": item.get("title") or item.get("name") or "",
+                            "url": item.get("url") or item.get("link") or "",
+                            "content": item.get("snippet") or item.get("content") or item.get("description") or item.get("abstract") or "",
+                        })
+                
+                if normalized:
+                    return _format_results(query, normalized, n)
+                else:
+                    # Return raw if no items found
+                    return f"Results for: {query}\n\n{result}"
+            except json.JSONDecodeError:
+                # If not JSON, return raw result with query context
+                return f"Results for: {query}\n\n{result}"
+        except Exception as e:
+            logger.error("MCP search failed: {}, falling back to Tavily", e)
+            return await self._search_tavily(query, n)
 
     async def _search_tavily(self, query: str, n: int) -> str:
         api_key = self.config.api_key or os.environ.get("TAVILY_API_KEY", "")
@@ -242,7 +336,7 @@ class WebFetchTool(Tool):
             jina_key = os.environ.get("JINA_API_KEY", "")
             if jina_key:
                 headers["Authorization"] = f"Bearer {jina_key}"
-            async with httpx.AsyncClient(proxy=self.proxy, timeout=20.0) as client:
+            async with httpx.AsyncClient(proxy=self.proxy, timeout=10.0) as client:  # Reduced from 20s to 10s
                 r = await client.get(f"https://r.jina.ai/{url}", headers=headers)
                 if r.status_code == 429:
                     logger.debug("Jina Reader rate limited, falling back to readability")
@@ -277,7 +371,7 @@ class WebFetchTool(Tool):
             async with httpx.AsyncClient(
                 follow_redirects=True,
                 max_redirects=MAX_REDIRECTS,
-                timeout=30.0,
+                timeout=15.0,  # Reduced from 30s to 15s
                 proxy=self.proxy,
             ) as client:
                 r = await client.get(url, headers={"User-Agent": USER_AGENT})
