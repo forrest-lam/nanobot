@@ -28,6 +28,7 @@ class CompatSession:
     pending_calls: list[ToolCall] = field(default_factory=list)
     search_results: list[dict[str, Any]] = field(default_factory=list)
     agent_waiting_answer: bool = False  # Agent Loop mode: waiting for tool execution completion
+    partial_messages: list[dict] = field(default_factory=list)  # Store partial messages when waiting for client tools
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 

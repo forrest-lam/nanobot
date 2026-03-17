@@ -316,6 +316,8 @@ class QQChatCompatConfig(Base):
     session_ttl_seconds: int = 1800
     max_sessions: int = 500
     allowed_tools: list[str] = Field(default_factory=list)
+    enable_skills: bool = False  # If False, disable skill loading and enable all client tools
+    log_prompts: bool = True  # If True, log all prompts to logs directory
 
 
 class WebSearchConfig(Base):

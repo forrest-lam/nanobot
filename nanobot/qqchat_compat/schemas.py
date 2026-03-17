@@ -11,12 +11,20 @@ from pydantic import BaseModel, Field
 class ToolCall(BaseModel):
     """A planned tool call returned to the client."""
 
-    id: str
+    id: str = ""
     tool: str
     arguments: dict[str, Any] = Field(default_factory=dict)
     reason: str = ""
     source_skill: str = ""
     priority: int = 1
+
+
+class MCPToolSchema(BaseModel):
+    """Schema definition for an MCP tool."""
+    
+    name: str
+    description: str = ""
+    input_schema: dict[str, Any] = Field(default_factory=dict)
 
 
 class InitRequest(BaseModel):
@@ -26,7 +34,15 @@ class InitRequest(BaseModel):
     session_id: str = "default"
     user_uid: str = ""
     user_nick: str = ""
-    available_mcp_tools: list[str] = Field(default_factory=list)
+    available_mcp_tools: list[str] = Field(
+        default_factory=list, 
+        description="Legacy field: tool names only (e.g. ['search_chats']). "
+                    "Use mcp_tool_schemas instead for full tool definitions."
+    )
+    mcp_tool_schemas: list[MCPToolSchema] = Field(
+        default_factory=list,
+        description="Recommended field: full tool definitions with name, description, and input_schema"
+    )
     client_version: str = ""
     client_metadata: dict[str, Any] = Field(default_factory=dict)
 

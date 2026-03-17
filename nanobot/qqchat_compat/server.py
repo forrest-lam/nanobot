@@ -13,9 +13,11 @@ from __future__ import annotations
 
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from loguru import logger
 
 from nanobot.agent.loop import AgentLoop
@@ -83,17 +85,34 @@ def create_app(
         restrict_to_workspace=full_config.tools.restrict_to_workspace,
         allowed_tools=allowed_tools,  # Pass whitelist to restrict tools
         channel="qqchat_http",  # Set channel to load qqchat-specific skills
+        log_prompts=config.log_prompts,  # Pass log_prompts config
     )
     
     # Hold MCP stack reference for cleanup
-    mcp_stack_holder = {"stack": None}
+    mcp_stack_holder: dict[str, Any] = {"stack": None}
+    
+    # Log at module level to confirm function is defined
+    logger.warning("QQChat compat: Defining lifespan function (this should appear once)")
     
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """Manage MCP connections lifecycle - connect BEFORE any requests."""
+        import sys
+        # Force output to stderr to bypass any logging config
+        sys.stderr.write("\n" + "=" * 80 + "\n")
+        sys.stderr.write("🚀🚀🚀 LIFESPAN STARTUP TRIGGERED! 🚀🚀🚀\n")
+        sys.stderr.write("=" * 80 + "\n")
+        sys.stderr.flush()
+        logger.info("QQChat compat: Lifespan startup BEGIN")
+        logger.debug("QQChat compat: tools_config={}, mcp_servers={}", 
+                     tools_config is not None, 
+                     getattr(tools_config, 'mcp_servers', None) if tools_config else None)
+        
         # Startup: Connect MCP servers BEFORE planner can try to activate skills
         if tools_config and tools_config.mcp_servers:
             from nanobot.agent.tools.mcp import connect_mcp_servers
+            
+            logger.info("QQChat compat: Connecting {} MCP servers...", len(tools_config.mcp_servers))
             
             try:
                 mcp_stack = AsyncExitStack()
@@ -110,36 +129,122 @@ def create_app(
                     add_prefix=False
                 )
                 
+                logger.info("QQChat compat: MCP servers connected, {} tools registered",
+                           len(agent_loop.tools.tool_names))
+                
                 # Enable tools that are in the whitelist
                 enabled_count = 0
                 for tool_name in allowed_tools:
-                    if agent_loop.tools.enable(tool_name) > 0:
+                    count = agent_loop.tools.enable(tool_name)
+                    if count > 0:
                         enabled_count += 1
+                        logger.debug("QQChat compat: Enabled tool '{}'", tool_name)
                 
                 logger.info(
-                    "QQChat compat: MCP connected, {} tools total, {} enabled",
+                    "QQChat compat: MCP setup complete, {} tools total, {} enabled",
                     len(agent_loop.tools.tool_names), enabled_count
                 )
             except Exception as e:
-                logger.error("QQChat compat: Failed to connect MCP servers: {}", e)
+                import traceback
+                logger.error("QQChat compat: Failed to connect MCP servers: {}\n{}", 
+                            e, traceback.format_exc())
                 if mcp_stack_holder["stack"]:
                     try:
                         await mcp_stack_holder["stack"].aclose()
                     except Exception:
                         pass
                     mcp_stack_holder["stack"] = None
+        else:
+            logger.warning("QQChat compat: No MCP servers configured (tools_config={}, mcp_servers={})",
+                          tools_config is not None,
+                          getattr(tools_config, 'mcp_servers', None) if tools_config else None)
         
+        logger.info("QQChat compat: Lifespan startup COMPLETE, yielding to app...")
         yield  # Application runs
         
         # Shutdown: Close MCP connections
+        logger.info("QQChat compat: Lifespan shutdown BEGIN")
         if mcp_stack_holder["stack"]:
             try:
                 await mcp_stack_holder["stack"].aclose()
                 logger.info("QQChat compat: MCP connections closed")
             except Exception as e:
                 logger.warning("QQChat compat: Error closing MCP connections: {}", e)
+        logger.info("QQChat compat: Lifespan shutdown COMPLETE")
     
+    logger.warning("QQChat compat: Creating FastAPI app with lifespan (lifespan function id: {})", id(lifespan))
     app = FastAPI(title="QQ Chat Assistant API", lifespan=lifespan)
+    
+    # Add custom exception handler for validation errors
+    @app.exception_handler(RequestValidationError)
+    async def validation_exception_handler(request, exc: RequestValidationError):
+        """Custom handler to detect common client mistakes in /init request."""
+        # Check if this is an /init request with wrong available_mcp_tools format
+        if request.url.path == "/init" or request.url.path.endswith("/init"):
+            # Print raw request body for debugging
+            try:
+                body = await request.json()
+                logger.info("=== /init request body ===")
+                logger.info("user_uin: {}", body.get("user_uin"))
+                logger.info("session_id: {}", body.get("session_id"))
+                logger.info("user_uid: {}", body.get("user_uid"))
+                logger.info("user_nick: {}", body.get("user_nick"))
+                logger.info("client_version: {}", body.get("client_version"))
+                logger.info("available_mcp_tools type: {}", type(body.get("available_mcp_tools")))
+                logger.info("available_mcp_tools length: {}", len(body.get("available_mcp_tools", [])))
+                if body.get("available_mcp_tools"):
+                    logger.info("available_mcp_tools[0] type: {}", type(body["available_mcp_tools"][0]))
+                    logger.info("available_mcp_tools[0] content: {}", body["available_mcp_tools"][0])
+                logger.info("mcp_tool_schemas length: {}", len(body.get("mcp_tool_schemas", [])))
+                logger.info("========================")
+            except Exception as e:
+                logger.error("Failed to parse request body: {}", e)
+            
+            for error in exc.errors():
+                # Detect: client sent objects instead of strings in available_mcp_tools
+                if (error.get("loc") and len(error["loc"]) >= 2 
+                    and error["loc"][1] == "available_mcp_tools"
+                    and error["type"] == "string_type"):
+                    
+                    logger.error(
+                        "Client sent tool objects to 'available_mcp_tools' field (expects string array). "
+                        "Client should use 'mcp_tool_schemas' field for full tool definitions. "
+                        "Original error: {}", error
+                    )
+                    
+                    return JSONResponse(
+                        status_code=422,
+                        content={
+                            "status": "error",
+                            "error": (
+                                "字段 'available_mcp_tools' 应为工具名称数组 (如 ['search_chats', 'get_profiles'])。"
+                                "请使用 'mcp_tool_schemas' 字段传递完整的工具定义(包含 name, description, inputSchema)。"
+                                "\n\n"
+                                "示例:\n"
+                                "{\n"
+                                '  "user_uin": "...",\n'
+                                '  "mcp_tool_schemas": [\n'
+                                "    {\n"
+                                '      "name": "search_chats",\n'
+                                '      "description": "搜索会话",\n'
+                                '      "input_schema": {\n'
+                                '        "type": "object",\n'
+                                '        "properties": {"keywords": {"type": "array"}},\n'
+                                '        "required": ["keywords"]\n'
+                                "      }\n"
+                                "    }\n"
+                                "  ]\n"
+                                "}"
+                            ),
+                            "detail": exc.errors(),
+                        }
+                    )
+        
+        # For other validation errors, return standard FastAPI response
+        return JSONResponse(
+            status_code=422,
+            content={"detail": exc.errors()}
+        )
 
     # ToolPolicy is a dataclass, initialize with allowed_tools
     policy = ToolPolicy(allowed_tools=allowed_tools)  # type: ignore[call-arg]
@@ -158,13 +263,18 @@ def create_app(
     
     # Setup planner with AgentLoop's tool registry
     # MCP tools will be registered during lifespan startup, before first request
-    package_skills_root = Path(__file__).resolve().parent.parent / "skills"
-    workspace_skills_root = workspace / "skills"
-    planner = SkillDrivenPlanner(
-        skill_roots=[workspace_skills_root, package_skills_root],
-        tool_registry=agent_loop.tools,  # Use AgentLoop's registry
-        prompt_store=prompt_store,
-    )
+    # If enable_skills is False, don't create planner
+    planner = None
+    if config.enable_skills:
+        package_skills_root = Path(__file__).resolve().parent.parent / "skills"
+        workspace_skills_root = workspace / "skills"
+        planner = SkillDrivenPlanner(
+            skill_roots=[workspace_skills_root, package_skills_root],
+            tool_registry=agent_loop.tools,  # Use AgentLoop's registry
+            prompt_store=prompt_store,
+        )
+    else:
+        logger.info("Skills disabled by config, all client tools will be enabled")
 
     app.include_router(
         create_router(
@@ -175,6 +285,8 @@ def create_app(
             planner=planner,
             policy=policy,
             agent_loop=agent_loop,
+            enable_skills=config.enable_skills,
         )
     )
+    logger.warning("QQChat compat: Returning FastAPI app (id: {})", id(app))
     return app

@@ -570,6 +570,140 @@ Now send a message to the bot from QQ — it should respond!
 </details>
 
 <details>
+<summary><b>QQChat HTTP API (QQ聊天兼容服务)</b></summary>
+
+A standalone HTTP compatibility layer for QQChatAgentServer protocol. Provides account-isolated sessions, memory, and tool restrictions for QQ chat integrations.
+
+**Key Features:**
+- **Account Isolation**: Sessions and memory are isolated per user (by UIN)
+- **Tool Whitelist**: Only allows web search and QQ chat retrieval tools
+- **Restricted Capabilities**: Blocks exec, file operations, and cron jobs
+- **Streaming Support**: SSE streaming for real-time responses
+- **Skill-based Planning**: Uses qqchat-search skills for intelligent query planning
+
+**1. Configure**
+
+Add to `~/.nanobot/config.json`:
+
+```json
+{
+  "qqchatCompat": {
+    "enabled": true,
+    "host": "0.0.0.0",
+    "port": 8990,
+    "sessionTtlSeconds": 1800,
+    "maxSessions": 500,
+    "enableSkills": true,
+    "logPrompts": false,
+    "allowedTools": []
+  }
+}
+```
+
+- `enableSkills`: If `false`, disable skill loading and enable all client-provided tools
+- `logPrompts`: If `true`, save all prompts to logs directory for debugging
+- `allowedTools`: Custom tool whitelist (empty = use defaults)
+
+**2. Configure MCP Server**
+
+The service requires `qqchat-search` MCP server for chat retrieval. Add to `~/.nanobot/config.json`:
+
+```json
+{
+  "tools": {
+    "mcpServers": {
+      "qqchat-search": {
+        "command": "node",
+        "args": ["/path/to/qqchat-search-mcp/build/index.js"],
+        "env": {}
+      }
+    }
+  }
+}
+```
+
+**3. Start the service**
+
+```bash
+nanobot qqchat-api
+# or with custom port/host
+nanobot qqchat-api --port 8990 --host 0.0.0.0
+```
+
+**4. API Endpoints**
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/init` | POST | Initialize client connection and save user config |
+| `/query` | POST | Submit a query and get tool calls or final answer |
+| `/submit_search_results` | POST | Submit tool execution results and continue |
+| `/health` | GET | Health check |
+| `/session/{uin}/{sid}` | GET | Get session status |
+
+**Example Client Flow:**
+
+```python
+import httpx
+
+# 1. Initialize connection
+resp = httpx.post("http://localhost:8990/init", json={
+    "user_uin": "12345",
+    "session_id": "chat_001",
+    "user_nick": "张三",
+    "mcp_tool_schemas": [
+        {
+            "name": "search_chats",
+            "description": "搜索QQ聊天会话",
+            "input_schema": {
+                "type": "object",
+                "properties": {"keywords": {"type": "array"}},
+                "required": ["keywords"]
+            }
+        }
+    ]
+})
+
+# 2. Send query
+resp = httpx.post("http://localhost:8990/query", json={
+    "user_uin": "12345",
+    "session_id": "chat_001",
+    "query": "帮我找一下和小王的聊天记录",
+    "stream": False
+})
+
+# 3. If need_search=True, execute tools and submit results
+if resp.json()["status"] == "need_search":
+    results = []
+    for call in resp.json()["mcp_calls"]:
+        # Execute tool...
+        result = execute_tool(call["tool"], call["arguments"])
+        results.append({
+            "tool": call["tool"],
+            "success": True,
+            "content": result
+        })
+    
+    # Submit results
+    resp = httpx.post("http://localhost:8990/submit_search_results", json={
+        "user_uin": "12345",
+        "session_id": "chat_001",
+        "search_results": results
+    })
+
+# 4. Get final answer
+print(resp.json()["final_answer"])
+```
+
+**Capability Restrictions (qqchat_http channel only):**
+
+This service applies strict tool restrictions **only** to the `qqchat_http` channel. Other nanobot channels (cli, telegram, etc.) are **not affected** and continue to use full capabilities.
+
+- ✅ **Allowed**: Web search, QQ chat retrieval (via MCP)
+- ❌ **Blocked**: exec, read_file, write_file, edit_file, list_dir, cron
+
+</details>
+
+<details>
 <summary><b>DingTalk (钉钉)</b></summary>
 
 Uses **Stream Mode** — no public IP required.
@@ -1239,6 +1373,8 @@ nanobot gateway --config ~/.nanobot-telegram/config.json --workspace /tmp/nanobo
 | `nanobot agent --no-markdown` | Show plain-text replies |
 | `nanobot agent --logs` | Show runtime logs during chat |
 | `nanobot gateway` | Start the gateway |
+| `nanobot qqchat-api` | Start QQChat HTTP compatibility API |
+| `nanobot qqchat-api --port 8990` | Start API on custom port |
 | `nanobot status` | Show status |
 | `nanobot provider login openai-codex` | OAuth login for providers |
 | `nanobot channels login` | Link WhatsApp (scan QR) |

@@ -25,11 +25,11 @@ class ContextBuilder:
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace, channel=channel)
 
-    def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
+    def build_system_prompt(self, skill_names: list[str] | None = None, enable_skills: bool = True) -> str:
         """Build the system prompt from identity, bootstrap files, memory, and skills."""
         # Use minimal prompt for qqchat_http to reduce context size
         if self.channel == "qqchat_http":
-            return self._build_qqchat_prompt()
+            return self._build_qqchat_prompt(enable_skills=enable_skills)
         
         parts = [self._get_identity()]
 
@@ -41,15 +41,16 @@ class ContextBuilder:
         if memory:
             parts.append(f"# Memory\n\n{memory}")
 
-        always_skills = self.skills.get_always_skills()
-        if always_skills:
-            always_content = self.skills.load_skills_for_context(always_skills)
-            if always_content:
-                parts.append(f"# Active Skills\n\n{always_content}")
+        if enable_skills:
+            always_skills = self.skills.get_always_skills()
+            if always_skills:
+                always_content = self.skills.load_skills_for_context(always_skills)
+                if always_content:
+                    parts.append(f"# Active Skills\n\n{always_content}")
 
-        skills_summary = self.skills.build_skills_summary()
-        if skills_summary:
-            parts.append(f"""# Skills
+            skills_summary = self.skills.build_skills_summary()
+            if skills_summary:
+                parts.append(f"""# Skills
 
 The following skills extend your capabilities. To use a skill, read its SKILL.md file using the read_file tool.
 Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
@@ -58,12 +59,12 @@ Skills with available="false" need dependencies installed first - you can try in
 
         return "\n\n---\n\n".join(parts)
     
-    def _build_qqchat_prompt(self) -> str:
+    def _build_qqchat_prompt(self, enable_skills: bool = True) -> str:
         """Build a minimal system prompt for qqchat_http channel.
         
         Reduces context size by:
         - Using concise identity (no bootstrap files)
-        - Including channel-specific skills and always-on skills
+        - Including channel-specific skills and always-on skills (if enable_skills=True)
         - No skills summary (no progressive loading)
         - Keeping memory context
         """
@@ -74,13 +75,14 @@ Skills with available="false" need dependencies installed first - you can try in
         if memory:
             parts.append(f"# Memory\n\n{memory}")
         
-        # Include channel-specific + always-on skills
-        # list_skills() with channel set will auto-filter channel-specific skills
-        channel_skills = [s["name"] for s in self.skills.list_skills(filter_unavailable=True)]
-        if channel_skills:
-            skills_content = self.skills.load_skills_for_context(channel_skills)
-            if skills_content:
-                parts.append(f"# Active Skills\n\n{skills_content}")
+        # Include channel-specific + always-on skills only if enable_skills=True
+        if enable_skills:
+            # list_skills() with channel set will auto-filter channel-specific skills
+            channel_skills = [s["name"] for s in self.skills.list_skills(filter_unavailable=True)]
+            if channel_skills:
+                skills_content = self.skills.load_skills_for_context(channel_skills)
+                if skills_content:
+                    parts.append(f"# Active Skills\n\n{skills_content}")
         
         return "\n\n---\n\n".join(parts)
     
@@ -202,6 +204,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         media: list[str] | None = None,
         channel: str | None = None,
         chat_id: str | None = None,
+        enable_skills: bool = True,
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call."""
         runtime_ctx = self._build_runtime_context(channel, chat_id)
@@ -215,7 +218,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
             merged = [{"type": "text", "text": runtime_ctx}] + user_content
 
         return [
-            {"role": "system", "content": self.build_system_prompt(skill_names)},
+            {"role": "system", "content": self.build_system_prompt(skill_names, enable_skills=enable_skills)},
             *history,
             {"role": "user", "content": merged},
         ]

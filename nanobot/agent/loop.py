@@ -65,6 +65,7 @@ class AgentLoop:
         channels_config: ChannelsConfig | None = None,
         allowed_tools: set[str] | None = None,
         channel: str | None = None,
+        log_prompts: bool = False,
     ):
         from nanobot.config.schema import ExecToolConfig, WebSearchConfig
 
@@ -80,6 +81,7 @@ class AgentLoop:
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
+        self.log_prompts = log_prompts
 
         self.context = ContextBuilder(workspace, channel=channel)
         self.sessions = session_manager or SessionManager(workspace)
@@ -246,6 +248,100 @@ class AgentLoop:
                 if hasattr(tool, "set_context"):
                     tool.set_context(channel, chat_id, *([message_id] if name == "message" else []))
 
+    def _log_prompt(self, session_id: str, messages: list[dict], tools: list[dict]) -> None:
+        """Log complete prompt (messages + tools) to logs directory.
+        
+        Args:
+            session_id: Session identifier for log filename
+            messages: Messages to send to LLM
+            tools: Tool definitions
+        """
+        if not self.log_prompts:
+            return
+            
+        try:
+            import datetime
+            
+            # Create logs directory if not exists
+            logs_dir = self.workspace / "logs"
+            logs_dir.mkdir(exist_ok=True)
+            
+            # Generate log filename: session_id_timestamp.json
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            log_file = logs_dir / f"{session_id}_{timestamp}.json"
+            
+            # Prepare log data with truncated tool results for better readability
+            messages_for_log = []
+            for msg in messages:
+                msg_copy = dict(msg)
+                
+                # Truncate tool results to first 100 chars for log file
+                if msg_copy.get("role") == "tool" and isinstance(msg_copy.get("content"), str):
+                    content = msg_copy["content"]
+                    if len(content) > 100:
+                        msg_copy["content"] = content[:100] + f"... [truncated, total {len(content)} chars]"
+                
+                # Detect and remove duplicate content in assistant messages
+                # Some LLMs may repeat content during streaming, this helps identify the issue
+                elif msg_copy.get("role") == "assistant" and isinstance(msg_copy.get("content"), str):
+                    content = msg_copy["content"]
+                    if content and len(content) > 20:  # Only check non-trivial content
+                        # Try to detect repeating patterns
+                        original_content = content
+                        deduped = False
+                        
+                        # Method 1: Split by double newlines and find repeating subsequences
+                        parts = [p for p in content.split("\n\n") if p.strip()]
+                        if len(parts) >= 2:
+                            # Try to find the minimal repeating unit
+                            for unit_size in range(1, len(parts) // 2 + 1):
+                                if len(parts) % unit_size == 0:
+                                    unit = parts[:unit_size]
+                                    is_repeating = True
+                                    for i in range(unit_size, len(parts), unit_size):
+                                        if parts[i:i+unit_size] != unit:
+                                            is_repeating = False
+                                            break
+                                    if is_repeating:
+                                        msg_copy["content"] = "\n\n".join(unit) + f" [DETECTED {len(parts)//unit_size}x DUPLICATE - removed in log]"
+                                        logger.warning("Detected {}x duplicate content in assistant message (session: {})", len(parts)//unit_size, session_id)
+                                        deduped = True
+                                        break
+                        
+                        # Method 2: Check if entire content is simply repeated 2x, 3x, 4x etc
+                        if not deduped:
+                            for repeat_count in [2, 3, 4, 5, 6]:
+                                segment_len = len(content) // repeat_count
+                                if segment_len > 10:  # Must be meaningful segment
+                                    segment = content[:segment_len]
+                                    is_repeated = True
+                                    for i in range(1, repeat_count):
+                                        if content[i*segment_len:(i+1)*segment_len] != segment:
+                                            is_repeated = False
+                                            break
+                                    if is_repeated:
+                                        msg_copy["content"] = segment + f" [DETECTED {repeat_count}x EXACT DUPLICATE - removed in log]"
+                                        logger.warning("Detected {}x exact duplicate in assistant message (session: {})", repeat_count, session_id)
+                                        break
+                
+                messages_for_log.append(msg_copy)
+            
+            log_data = {
+                "timestamp": datetime.datetime.now().isoformat(),
+                "session_id": session_id,
+                "model": self.model,
+                "messages": messages_for_log,
+                "tools": tools,
+            }
+            
+            # Write to file
+            with open(log_file, "w", encoding="utf-8") as f:
+                json.dump(log_data, f, ensure_ascii=False, indent=2)
+                
+            logger.debug("Logged prompt to: {}", log_file)
+        except Exception as e:
+            logger.warning("Failed to log prompt: {}", e)
+
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
         """Remove <think>…</think> blocks that some models embed in content."""
@@ -279,6 +375,15 @@ class AgentLoop:
             iteration += 1
 
             tool_defs = self.tools.get_definitions()
+            
+            # Log prompt if enabled
+            session_id = "unknown"
+            for msg in messages:
+                if msg.get("role") == "user" and isinstance(msg.get("content"), str):
+                    import hashlib
+                    session_id = hashlib.md5(msg["content"][:50].encode()).hexdigest()[:8]
+                    break
+            self._log_prompt(session_id, messages, tool_defs)
 
             response = await self.provider.chat_with_retry(
                 messages=messages,
@@ -339,20 +444,33 @@ class AgentLoop:
         self,
         initial_messages: list[dict],
         on_progress: Callable[..., Awaitable[None]] | None = None,
-    ) -> AsyncGenerator[tuple[str, bool, list[dict]], None]:
+    ) -> AsyncGenerator[tuple[str, bool, list[dict], list[dict] | None], None]:
         """
         Run agent loop with streaming.
         
         Yields:
-            Tuple of (content_chunk, is_final, messages)
+            Tuple of (content_chunk, is_final, messages, tool_calls_info)
+            tool_calls_info is None for content chunks, or list of {"name": str, "arguments": dict} for tool calls
         """
         messages = initial_messages
         iteration = 0
-        final_content_parts = []
+        total_chunks_yielded = 0  # Track total chunks for debugging
 
         while iteration < self.max_iterations:
             iteration += 1
             tool_defs = self.tools.get_definitions()
+            logger.debug("Stream iteration {}/{}", iteration, self.max_iterations)
+
+            # Log prompt if enabled (extract session_id from messages or use a default)
+            session_id = "unknown"
+            for msg in messages:
+                if msg.get("role") == "user" and isinstance(msg.get("content"), str):
+                    # Try to extract session_id from first user message
+                    # Fallback to using a hash of first message
+                    import hashlib
+                    session_id = hashlib.md5(msg["content"][:50].encode()).hexdigest()[:8]
+                    break
+            self._log_prompt(session_id, messages, tool_defs)
 
             # Try streaming first
             try:
@@ -366,6 +484,7 @@ class AgentLoop:
                 has_tool_calls = False
                 tool_calls_list = []
                 last_response = None
+                chunk_count = 0  # Track chunks in this iteration
                 
                 async for chunk in stream:
                     last_response = chunk
@@ -373,9 +492,11 @@ class AgentLoop:
                     # Stream content chunks
                     if chunk.content:
                         accumulated_content += chunk.content
-                        final_content_parts.append(chunk.content)
-                        # logger.debug("Streaming chunk: {} chars", len(chunk.content))
-                        yield (chunk.content, False, messages)
+                        chunk_count += 1
+                        total_chunks_yielded += 1
+                        logger.debug("Iter {}: Yielding chunk #{} ({} chars), total={}", 
+                                    iteration, chunk_count, len(chunk.content), total_chunks_yielded)
+                        yield (chunk.content, False, messages, None)
                     
                     # Collect tool calls
                     if chunk.tool_calls:
@@ -399,7 +520,34 @@ class AgentLoop:
                         thinking_blocks=last_response.thinking_blocks if last_response else None,
                     )
                     
-                    # Execute tools
+                    # Check if any tool is a client-provided tool that should not be executed here
+                    # Yield tool calls info for caller to decide
+                    tool_calls_info = [
+                        {"name": tc.name, "id": tc.id, "arguments": tc.arguments}
+                        for tc in tool_calls_list
+                    ]
+                    
+                    # Check if there are client tools that should be handled by caller
+                    has_client_tools = False
+                    try:
+                        for tc in tool_calls_list:
+                            tool_obj = self.tools.get(tc.name)
+                            if tool_obj and hasattr(tool_obj, '__class__'):
+                                # Check if it's a client tool by trying to execute
+                                # Client tools will raise NotImplementedError
+                                if tool_obj.__class__.__name__ == 'ClientProvidedTool':
+                                    has_client_tools = True
+                                    break
+                    except Exception:
+                        pass
+                    
+                    if has_client_tools:
+                        # Yield tool calls for client to handle, don't execute
+                        logger.info("Detected client-provided tools, delegating to caller")
+                        yield ("", False, messages, tool_calls_info)
+                        return
+                    
+                    # Execute tools (non-client tools)
                     for tool_call in tool_calls_list:
                         args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                         logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
@@ -407,14 +555,17 @@ class AgentLoop:
                         messages = self.context.add_tool_result(
                             messages, tool_call.id, tool_call.name, result
                         )
+                    logger.debug("Iter {}: Tools executed, continuing to next iteration", iteration)
+                    # Loop continues to next iteration with tool results
                 else:
                     # No tool calls, final response
                     clean = self._strip_think(accumulated_content)
+                    logger.debug("Iter {}: Final response, {} chunks total", iteration, total_chunks_yielded)
                     
                     if last_response and last_response.finish_reason == "error":
                         logger.error("LLM returned error: {}", (clean or "")[:200])
                         error_msg = clean or "Sorry, I encountered an error calling the AI model."
-                        yield (error_msg, True, messages)
+                        yield (error_msg, True, messages, None)
                         return
                     
                     messages = self.context.add_assistant_message(
@@ -423,7 +574,7 @@ class AgentLoop:
                         reasoning_content=last_response.reasoning_content if last_response else None,
                         thinking_blocks=last_response.thinking_blocks if last_response else None,
                     )
-                    yield ("", True, messages)
+                    yield ("", True, messages, None)
                     return
                     
             except Exception as e:
@@ -449,6 +600,29 @@ class AgentLoop:
                         thinking_blocks=response.thinking_blocks,
                     )
                     
+                    # Check if any tool is a client-provided tool
+                    tool_calls_info = [
+                        {"name": tc.name, "id": tc.id, "arguments": tc.arguments}
+                        for tc in response.tool_calls
+                    ]
+                    
+                    has_client_tools = False
+                    try:
+                        for tc in response.tool_calls:
+                            tool_obj = self.tools.get(tc.name)
+                            if tool_obj and hasattr(tool_obj, '__class__'):
+                                if tool_obj.__class__.__name__ == 'ClientProvidedTool':
+                                    has_client_tools = True
+                                    break
+                    except Exception:
+                        pass
+                    
+                    if has_client_tools:
+                        # Yield tool calls for client to handle
+                        logger.info("Detected client-provided tools (fallback), delegating to caller")
+                        yield ("", False, messages, tool_calls_info)
+                        return
+                    
                     for tool_call in response.tool_calls:
                         args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                         logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
@@ -461,7 +635,7 @@ class AgentLoop:
                     if response.finish_reason == "error":
                         logger.error("LLM returned error: {}", (clean or "")[:200])
                         error_msg = clean or "Sorry, I encountered an error calling the AI model."
-                        yield (error_msg, True, messages)
+                        yield (error_msg, True, messages, None)
                         return
                     
                     messages = self.context.add_assistant_message(
